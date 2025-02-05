@@ -10,17 +10,19 @@ from flask_sqlalchemy import SQLAlchemy
 # Initialize Flask app
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
-db = SQLAlchemy(app)
 app.secret_key = "m4xpl0it"
+
+# Initialize database
+db = SQLAlchemy(app)
 
 # Load trained AI model for disease prediction
 model_path = "model/random_forest.joblib"
 if not os.path.exists(model_path):
     raise FileNotFoundError(f"Model file not found at {model_path}")
 
-disease_model = joblib.load(model_path)
+model, vectorizer = joblib.load(model_path)
 
-# Session & user data storage
+# User session storage
 userSession = {}
 all_result = {}
 
@@ -28,18 +30,89 @@ all_result = {}
 class msgCons:
     WELCOME_GREET = ["Hello!", "Hi there!", "Welcome!", "Greetings!", "Hey!"]
 
-def predict_disease_from_symptom(symptoms):
-    """
-    Uses the trained AI model to predict disease based on input symptoms.
-    """
-    input_text = ", ".join(symptoms)  # Convert list to comma-separated string
-    predicted_disease = disease_model.predict([input_text])[0]
-    return predicted_disease, predicted_disease  # Returning same label for now
+# User Model for Authentication
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(80), nullable=False)
+
+# Home Page Route
+import os
 
 @app.route("/")
-def index():
+def home():
+    template_path = os.path.join(app.root_path, "templates", "index.html")
+    if not os.path.exists(template_path):
+        return "Template Not Found: " + template_path, 404
     return render_template("index.html")
 
+
+# Login Route
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        uname = request.form["uname"]
+        passw = request.form["passw"]
+        user = User.query.filter_by(username=uname, password=passw).first()
+        if user:
+            session["user"] = uname  # Store user in session
+            return redirect(url_for("home"))
+    return render_template("login.html")
+
+# Register Route
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        uname = request.form['uname']
+        mail = request.form['mail']
+        passw = request.form['passw']
+        new_user = User(username=uname, email=mail, password=passw)
+        db.session.add(new_user)
+        db.session.commit()
+        return redirect(url_for("login"))
+    return render_template("register.html")
+
+# Logout Route
+@app.route("/logout")
+def logout():
+    session.pop("user", None)
+    return redirect(url_for("home"))
+
+# Dashboard Route
+@app.route("/dashboard")
+def dashboard():
+    if "user" not in session:
+        return redirect(url_for("login"))
+    return render_template("dashboard.html", user_name=session["user"], appointments=[])
+
+# Book Appointment Route
+@app.route("/book-appointment", methods=["GET", "POST"])
+def book_appointment():
+    if "user" not in session:
+        return redirect(url_for("login"))
+
+    if request.method == "POST":
+        doctor_id = request.form.get("doctor")
+        date = request.form.get("date")
+        time = request.form.get("time")
+        print(f"Booking appointment with Doctor ID: {doctor_id}, Date: {date}, Time: {time}")
+        return redirect(url_for("dashboard"))
+    
+    doctors = [
+        {"id": 1, "name": "Dr. Smith", "specialization": "Cardiologist"},
+        {"id": 2, "name": "Dr. Johnson", "specialization": "Dermatologist"},
+        {"id": 3, "name": "Dr. Lee", "specialization": "Pediatrician"},
+    ]
+    return render_template("book-appointment.html", doctors=doctors)
+
+# Disease Prediction Function
+def predict_disease_from_symptom(symptoms):
+    input_vector = vectorizer.transform([", ".join(symptoms)])
+    predicted_disease = model.predict(input_vector)[0]
+    return predicted_disease, predicted_disease
+
+# Chatbot Route
 @app.route("/chat_msg", methods=["GET"])
 def chat_msg():
     user_message = request.args.get("message", "").lower()
@@ -77,38 +150,9 @@ def chat_msg():
             response.append("2. Check Disease Symptoms")
             userSession[session_id] = "CHOOSE_ACTION"
 
-    elif user_state == "CHOOSE_ACTION":
-        if '2' in user_message or 'check' in user_message:
-            response.append(f"{all_result['name']}, what's the disease name?")
-            userSession[session_id] = "ASK_DISEASE_NAME"
-        else:
-            response.append(f"{all_result['name']}, what symptoms are you experiencing?")
-            response.append('<a href="/diseases" target="_blank">Symptoms List</a>')
-            userSession[session_id] = "COLLECT_SYMPTOMS"
-
-    elif user_state == "COLLECT_SYMPTOMS":
-        all_result['symptoms'] = all_result.get('symptoms', [])
-        all_result['symptoms'].extend(user_message.split(","))
-        response.append(f"{all_result['name']}, what other symptoms are you experiencing?")
-        response.append("1. Check Disease")
-        response.append('<a href="/diseases" target="_blank">Symptoms List</a>')
-        userSession[session_id] = "CONFIRM_SYMPTOMS"
-
-    elif user_state == "CONFIRM_SYMPTOMS":
-        if '1' in user_message or 'disease' in user_message:
-            print("DEBUG: Calling AI model for disease prediction...")
-            try:
-                disease, disease_type = predict_disease_from_symptom(all_result['symptoms'])
-                print(f"DEBUG: Predicted Disease: {disease}")
-                response.append("<b>The following disease may be causing your discomfort:</b>")
-                response.append(disease)
-                response.append(f'<a href="https://www.google.com/search?q={disease_type} disease hospital near me" target="_blank">Search Nearby Hospitals</a>')
-                userSession[session_id] = "RESULT_DISPLAYED"
-            except Exception as e:
-                response.append("Error predicting disease. Please try again.")
-
     return jsonify({'status': 'OK', 'answer': response})
 
+# Run Flask App
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
